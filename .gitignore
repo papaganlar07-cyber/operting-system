@@ -1,6 +1,6 @@
-(empty)node_modules/
+# Build artifacts
+amc-os/build/node_modules/
 .next/
 dist/
 build/
 *.log
-node_modules/

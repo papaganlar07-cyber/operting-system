@@ -22,6 +22,7 @@ static int fails = 0;
 #define CHECK(cond, ...) do { int _c=(cond); printf(_c?"  ok  : ":"  FAIL: "); printf(__VA_ARGS__); printf("\n"); if(!_c) fails++; } while (0)
 
 void personalization_sim_test(void) {
+    printf("M-A\n"); fflush(stdout);
     printf("\n[personalization] tema motoru:\n");
     amc_theme t = theme_load_named("Kiraz");
     CHECK(!strcmp(t.name,"Kiraz"), "Kiraz temasi yuklendi");
@@ -31,6 +32,7 @@ void personalization_sim_test(void) {
     /* CLI: renk degistir + kaydet + geri yukle */
     char *av[] = {"amctheme","set","accent","#ff5555"};
     CHECK(amctheme_cli(4, av, &t)==0 && t.accent==0xFFFF5555u, "amctheme set accent #ff5555");
+    printf("M-B\n"); fflush(stdout);
     CHECK(theme_save(&t, "/tmp/kiraz.amcthem")==0, "tema .amcthem dosyasina kaydedildi");
     amc_theme t2; memset(&t2,0,sizeof t2); theme_defaults(&t2);
     CHECK(theme_load_file(&t2, "/tmp/kiraz.amcthem")==0, "tema dosyadan geri yuklendi");
@@ -39,6 +41,7 @@ void personalization_sim_test(void) {
     char *aw[] = {"amctheme","wall","/home/amc/resim.png"};
     CHECK(amctheme_cli(3, aw, &t)==0 && !t.wall.is_generated, "duvar kagidi resmi ayarlandi");
 
+    printf("M-E\n"); fflush(stdout);
     printf("[personalization] animasyon motoru:\n");
     win_anim a;
     anim_start(&a, FX_SCALE, EA_SPRING, 0, 100,100,600,400, 100,100,600,400, 320, t.anim_speed);
@@ -56,6 +59,7 @@ void personalization_sim_test(void) {
     CHECK(first_sy < 0.3f, "genie kapanisi ilk frame'de dikeyde buzuyor");
     CHECK(frames>=20 && frames<=40, "genie suresi ~%d frame (hiz:%%100)", frames);
 
+    printf("M-H\n"); fflush(stdout);
     printf("[personalization] AMC-AI yerel asistan:\n");
     ai_reply r;
     amc_ai_query("temayi kiraz yapar misin?", &r);
@@ -72,6 +76,7 @@ void personalization_sim_test(void) {
     CHECK(r.intent==INT_SMALLTALK, "smalltalk niyeti");
     amc_ai_init();
 
+    printf("M-K\n"); fflush(stdout);
     printf("[personalization] pencere dekorasyonu sim-renderi:\n");
     /* 240x160 sahte yuzeyde baslik cubugu + buton stilleri cizilmeli gibi dogrula */
     for (int d=0; d<=3; d++) {
