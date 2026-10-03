@@ -12,8 +12,13 @@
  * ============================================================ */
 #include <stdint.h>
 #include <stdbool.h>
+#ifdef AMC_SIM
+#include "posix_compat.h"
+#endif
 typedef uint64_t u64; typedef uint32_t u32;
+#ifndef AMC_SIM
 void kprintf(const char *fmt, ...);
+#endif
 
 /* ---- IA32_FEATURE_CONTROL / VMXON ---- */
 #define MSR_IA32_FEATURE_CTRL 0x3A

@@ -24,7 +24,7 @@ uint8_t sim_iop[0x10000];
 uint8_t sim_mmio[0x40000];
 
 /* ---------------- PCI konfig alanı ---------------- */
-#define MAXFN 64
+#define MAXFN ((32*32*8)) /* bus*dev*fn tam yuva tablosu */
 struct pcidev {
     int used; uint16_t vid, did; uint32_t classrev;
     uint32_t bar[6]; uint32_t size[6];   /* BAR boyutu (size probing) */
@@ -156,6 +156,105 @@ static void xhci_poll(void){
     }
 }
 
+
+/* ---------------- NVMe 1.4 sanal denetleyici (Samsung PM9A1) ---------------- */
+#define NVME_MMIO_BASE 0x20000u   /* sim_mmio icinde ayrilmis bolge */
+static void sim_nvme_reset(void){
+    uint8_t *r = sim_mmio + NVME_MMIO_BASE;
+    memset(r, 0, 0x2000);                     /* bolgeyi temizle (CC/CSTS/doorbell dahil) */
+    uint64_t cap = (31ull<<52)|(1ull<<48)|(15ull<<32)|(3ull<<24)|(0ull<<16)|(255ull<<0);
+    memcpy(r+0x00,&cap,8);                    /* CAP: TO=255,CQR=1,MPSMIN=0,NSSRS=1,SQES/CQES=6 */
+    *(uint32_t*)(r+0x04) |= (1u<<4);          /* CAP.CSS: NVM command set bit */
+    *(uint32_t*)(r+0x14) = 0x007f00ff;        /* VS 1.4.0 */
+    *(uint32_t*)(r+0x1C) = 0;                 /* INTMS */
+    /* surucu CC.EN oncesi AQA/ASQ/ACQ yazmali; sim yine de varsayilan veriyor */
+    *(uint32_t*)(r+0x28) = 0x1000;            /* ASQ varsayilan */
+    *(uint32_t*)(r+0x2C) = 0x2000;            /* ACQ varsayilan */
+    *(uint32_t*)(r+0x18) = (63u<<16)|63u;     /* AQA: 64 derinlik */
+    /* CC=0 → CSTS.RDY=0; surucu ASENKRON ACILMA modelini uygular:
+       CC.EN yazilinca bir sonraki tickte RDY=1 olur (spec §3.1.4). */
+}
+/* Sanal NVMe bellek haritasi: surucunun "fiziksel" adresleri sim_mmio icine
+   dogrudan eslenir (ASQ=0x1000, ACQ=0x2000, PRP1=kullanici buffer'i). */
+#define NV_CC  (*(volatile uint32_t*)(sim_mmio+NVME_MMIO_BASE+0x04))
+#define NV_CSTS (*(volatile uint32_t*)(sim_mmio+NVME_MMIO_BASE+0x0C))
+#define NV_AQA (*(volatile uint32_t*)(sim_mmio+NVME_MMIO_BASE+0x18))
+#define NV_ASQ (*(volatile uint32_t*)(sim_mmio+NVME_MMIO_BASE+0x28))
+#define NV_ACQ (*(volatile uint32_t*)(sim_mmio+NVME_MMIO_BASE+0x2C))
+#define NV_DB_TAIL (*(volatile uint32_t*)(sim_mmio+NVME_MMIO_BASE+0x1000))
+static uint16_t g_nv_sq_seen = 0;   /* islenen admin SQ tail */
+static uint16_t g_nv_cq_tail = 0;   /* uretilen CQE ring pozisyonu */
+static uint16_t g_nv_phase   = 1;   /* ilk tur phase=1 (spec: CQE phase bit) */
+static int      g_nvme_sim   = 0;   /* surucunun "fiziksel" PRP adreslerini sim_mmio'ya kaydirma bayragi */
+
+/* Surucu gercek sanal/fiziksel pointer kullaniyor; sim hepsini tek 256KB
+   alana kaydirmak yerine, gecici bir "golge" buffer uzerinden calisir:
+   en basit dogru yol — PRP hedefini surucunun kendi struct'i olarak bilmek.
+   Bunun yerine sim, her komut icin prp1'i NVME_SHADOW tabanina esler. */
+#define NV_SHADOW_BASE 0x8000u
+#define NV_SHADOW_SZ   0x4000u   /* 16KB: SQ/ACQ/CQE alanlari + identify sayfalarina yetmez -> buyuk isteklerde atla */
+
+static void nvme_poll(void){
+    /* acilma/kapanma semantigi (NVMe spec 3.1.4) — sim senkron varyanti:
+       CC.EN=1 → RDY=1; CC.EN=0 ya da SHN!=0 → RDY=0 + kuyruk sifirla */
+    uint8_t shn = (uint8_t)((NV_CC >> 10) & 3u);
+    if((NV_CC & 1u) && !shn){ NV_CSTS |= 1u; }
+    else if (NV_CSTS & 1u) { NV_CSTS &= ~1u; g_nv_sq_seen=g_nv_cq_tail=0; g_nv_phase=1;
+                             if(shn==1||shn==2){ /* shutdown notify: kayit birak */ } }
+    if(!(NV_CC & 1u)) return;
+
+    uint16_t depth = (uint16_t)((NV_AQA & 0xFFFF) + 1);
+    uint16_t tail  = (uint16_t)NV_DB_TAIL;
+    while (g_nv_sq_seen != tail) {
+        volatile uint8_t *sqe = sim_mmio + (NV_ASQ & ~0xFFFu) + (uint32_t)g_nv_sq_seen*64;
+        uint8_t  opc   = sqe[0];
+        uint16_t cid   = *(volatile uint16_t*)(sqe+8);
+        uint64_t prp1  = *(volatile uint64_t*)(sqe+16);
+        uint32_t cdw10 = *(volatile uint32_t*)(sqe+40);
+        uint32_t result = 0; uint16_t status = 0;
+
+        if (opc == 0x06) {                       /* Identify */
+            volatile uint8_t *dst = sim_mmio + (uint32_t)prp1;
+            memset((void*)dst, 0, 4096);
+            if (cdw10 == 1) {                    /* CNS=1 controller */
+                memcpy((void*)dst, "Samsung SSD 9A1 1TB", 21);      /* MN@0 */
+                memcpy((void*)dst+24, "AMCSIM0001", 10);            /* SN@24 */
+                memcpy((void*)dst+26? (void*)dst: (void*)dst, "", 0);
+                dst[51]='0'; dst[52]='1';                            /* FR@26..33 baslangic*/
+                *(uint32_t*)((char*)dst+520) = 1;                    /* NN namespace sayisi */
+                result = 0;
+            } else if (cdw10 == 0) {             /* CNS=0 namespace */
+                uint64_t nsze = 234441984ull;                        /* ~1TB @4KB LBA */
+                memcpy((void*)dst,     &nsze, 8);                    /* NSZE */
+                memcpy((void*)dst+8,   &nsze, 8);                    /* NCAP */
+                memcpy((void*)dst+16,  &nsze, 8);                    /* NUSE */
+                dst[26] = 0;                                         /* LBAF0: 4096B */
+                result = 1;
+            }
+        } else if (opc == 0x01 || opc == 0x02) { /* Read/Write: ayni fiziksel uzay -> no-op */
+        } else if (opc == 0x0c) {                /* Get Log Page */
+        } else if (opc == 0x09) {                /* Set/Get Features */
+        } else if (opc == 0x0c) {                /* Get Log Page (Smart/Health) */
+            volatile uint8_t *lg = sim_mmio + (uint32_t)prp1;
+            memset((void*)lg, 0, 512);
+            lg[2] = (uint8_t)(38 + 273);                             /* composite temp */
+            lg[32]= 97;                                              /* avail spare % */
+            lg[196]= 4;                                              /* percentage used */
+            lg[220]=0x20; lg[221]=0x4e;                              /* data units written low */
+        } else { status = 0; }                   /* bilinen opcode: success ACK */
+
+        volatile uint8_t *cqe = sim_mmio + (NV_ACQ & ~0xFFFu) + (uint32_t)g_nv_cq_tail*16;
+        *(volatile uint32_t*)(cqe+0)  = result;
+        *(volatile uint16_t*)(cqe+8)  = 0;                           /* SQ head */
+        *(volatile uint16_t*)(cqe+10) = g_nv_sq_seen;                /* SQ id */
+        *(volatile uint16_t*)(cqe+12) = cid;
+        *(volatile uint16_t*)(cqe+14) = (uint16_t)((status << 1) | g_nv_phase);
+        g_nv_cq_tail = (uint16_t)((g_nv_cq_tail + 1) % depth);
+        if (g_nv_cq_tail == 0) g_nv_phase ^= 1;
+        g_nv_sq_seen = (uint16_t)((g_nv_sq_seen + 1) % depth);
+    }
+}
+
 /* ---------------- kurulum / bakım ---------------- */
 void sim_hw_init(void){
     printf("[sim-hw] sanal anakart yukleniyor:\n");
@@ -180,6 +279,7 @@ void sim_hw_init(void){
     add_dev(4,0,0,    0x10ec,0x8822,0x02800000,"Realtek RTL8822CE WiFi");
     devs[slot(4,0,0)].bar[0]=0xfb000000|2; devs[slot(4,0,0)].size[0]=0x100000;
     xhci_init_regs();
+    sim_nvme_reset();
     /* HGA GCAP: 2 output streams, 4 input, corr/bist supported */
     mmio_write32((void*)(uintptr_t)(HDA_BASE+0x00), (2u<<16)|(4u<<8)|0x03);
     printf("[sim-hw] hazir. (codec: Realtek ALC269 ailesi)\n");
@@ -189,6 +289,7 @@ void sim_hw_init(void){
 void sim_hw_tick(void){
     hda_poll();
     xhci_poll();
+    nvme_poll();
     /* RTL8169 TX: FIFO boş simülasyonu (TSAd bitini set et) */
     uint32_t txde = mmio_read32((void*)(uintptr_t)0x2000);
     if(txde & 0x80000000u) mmio_write32((void*)(uintptr_t)0x2000, (txde & ~0x80000000u) | 0x40000000u);

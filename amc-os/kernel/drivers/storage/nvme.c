@@ -16,11 +16,18 @@
  * ============================================================ */
 #include <stdint.h>
 #include <stdbool.h>
+#ifdef AMC_SIM
+#include "posix_compat.h"
+#endif
 #include <stddef.h>
 
 typedef uint8_t  u8;  typedef uint16_t u16; typedef uint32_t u32; typedef uint64_t u64;
+#ifndef AMC_SIM
 void kprintf(const char *fmt, ...);
-extern void *sim_mmio; 
+#endif
+#ifndef AMC_SIM
+extern void *sim_mmio;
+#endif 
 static volatile u32 *map(u64 off){ return (volatile u32*)((char*)sim_mmio + (off & 0x3FFFF)); }
 #define REG(r)      (*map(r))
 #define REGW(r,v)   (*map(r) = (v))
@@ -58,6 +65,17 @@ struct nvme_ctrl {
     bool ready;
 };
 static struct nvme_ctrl g_nvme;
+
+/* ---- sim: surucunun "fiziksel" adreslerini donanim modeliyle paylas ---- */
+#ifdef AMC_SIM
+u64 sim_xlate(void *p){ return (u64)(uintptr_t)p; }   /* ayni alan: pointer==addr */
+void sim_publish_q(u64 asq, u64 acq);                  /* sim_hw.c'de tanimli */
+#define XLATE(p) sim_xlate(p)
+#else
+#define XLATE(p) ((u64)(uintptr_t)(p))                 /* gercek kernel: fiziksel cevirici baglanacak
+                                                          (mm_virt2phys ile degistirilecek) */
+#define sim_publish_q(a,b) ((void)0)
+#endif
 
 int nvme_submit(struct nvme_sqe *cmd);
 int nvme_poll_completion(u16 cid, u32 *result, u16 *status_out);

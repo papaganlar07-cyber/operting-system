@@ -8,13 +8,18 @@
  * ============================================================ */
 #include <stdint.h>
 #include <stdbool.h>
+#ifdef AMC_SIM
+#include "posix_compat.h"
+#endif
 
 typedef uint64_t u64; typedef int64_t i64; typedef uint32_t u32; typedef uint8_t u8;
 
 static u64 g_ticks_ms  = 0;   /* 1ms tik sayacı          */
 static u64 g_boot_unix = 0;   /* boot anındaki unix time */
 
+#ifndef AMC_SIM
 void kprintf(const char *fmt, ...);
+#endif
 
 /* ---- invariant TSC kalibrasyonu (sim'de sabit) ---- */
 u64 tsc_freq_hz(void) {

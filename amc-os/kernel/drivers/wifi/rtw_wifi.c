@@ -16,8 +16,13 @@
  * ============================================================ */
 #include <stdint.h>
 #include <stdbool.h>
+#ifdef AMC_SIM
+#include "posix_compat.h"
+#endif
 typedef uint8_t u8; typedef uint16_t u16; typedef uint32_t u32; typedef uint64_t u64;
+#ifndef AMC_SIM
 void kprintf(const char *fmt, ...);
+#endif
 typedef unsigned long size_t;
 static void snprintf_safe(char *dst, size_t n, const char *src);
 

@@ -45,9 +45,20 @@ static inline void mmio_write64(volatile void *a, uint64_t v){
 /* ---- PCI konfigürasyon alanı (simüle cihazlar, sim_hw.c) ---- */
 uint32_t sim_pci_read (uint16_t b,uint16_t d,uint16_t f,uint16_t o);
 void     sim_pci_write(uint16_t b,uint16_t d,uint16_t f,uint16_t o,uint32_t v);
+#define pci_conf_read(b,d,f,o) sim_pci_read((b),(d),(f),(o))
+
+/* ---- MSR sahteleme (VMX modülü için; sim'de kayıt tutulur) ---- */
+static inline void wrmsr(uint32_t msr, uint64_t val) {
+    extern void sim_msr_write(uint32_t msr, uint64_t val);
+    sim_msr_write(msr, val);
+}
+static inline uint64_t rdmsr(uint32_t msr) {
+    extern uint64_t sim_msr_read(uint32_t msr);
+    return sim_msr_read(msr);
+}
 
 /* ---- kprintf -> stdout ---- */
-#define kprintf printf
+int kprintf(const char *fmt, ...);   /* sim_kprintf.c'de tanımlı (varargs + önek) */
 
 /* ---- panic -> temiz hata çıkışı ---- */
 #define PANIC(msg) do{ printf("\nPANIC: %s\n",(msg)); exit(1);}while(0)

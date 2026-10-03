@@ -37,13 +37,13 @@ test-boot: build/stage1.bin
 	else echo "[test-boot] HATA: boyut=$$sz imza=$$sig"; exit 1; fi
 
 # ---------- Simulasyon (kernel algoritmalari gercekten calisir) ----------
-SIMSRC := sim/sim_main.c sim/sim_hw.c sim/sim_tests.c \
+SIMSRC := sim/sim_main.c sim/sim_hw.c sim/sim_tests.c sim/sim_kprintf.c \
           kernel/time/timesrc.c kernel/drivers/storage/nvme.c \
           kernel/drivers/wifi/rtw_wifi.c kernel/arch/x86_64/vmx.c
 
 sim: build/amcsim
 
-build/amcsim: $(SIMSRC) sim/posix_compat.h
+build/amcsim: $(SIMSRC) sim/posix_compat.h sim/sim_hw.c Makefile
 	@mkdir -p build
 	$(HOSTCC) -DAMC_SIM -I sim -I kernel -O1 -g -Wall -Wextra -Wno-unused-parameter \
 	  $(SIMSRC) -o $@
