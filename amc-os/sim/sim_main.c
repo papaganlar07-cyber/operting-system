@@ -16,13 +16,14 @@ void wifi_init(void); void vmx_selftest(void);
 /* sürücü self-test köprüleri (sim derlemesinde aktif): */
 void hda_sim_test(void); void xhci_sim_test(void); void gpu_sched_sim_test(void);
 void sched_sim_stress(void); void amcfs_sim_test(void); void ports_sim_demo(void);
+void personalization_sim_test(void);
 
 u64 shim_uptime(void){ extern u64 k_uptime_ms(void); return k_uptime_ms(); }
 
 int main(int argc, char **argv) {
     (void)argc;(void)argv;
     printf("=====================================================\n");
-    printf("= AMC OS v0.5 SIM — sanal anakart + gercek kod yollari =\n");
+    printf("= AMC OS v0.6 SIM — sanal anakart + gercek kod yollari =\n");
     printf("=====================================================\n");
     sim_hw_init();
     timesrc_init();
@@ -53,6 +54,7 @@ int main(int argc, char **argv) {
     amcfs_sim_test();     /* journaling commit/replay */
     ports_sim_demo();     /* Linux/FreeBSD/OpenBSD port demo */
     vmx_selftest();
+    personalization_sim_test(); /* v0.6: tema+animasyon+AI */
 
     for (int i=0;i<3;i++) sim_hw_tick();
     nvme_shutdown();

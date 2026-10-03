@@ -38,15 +38,18 @@ test-boot: build/stage1.bin
 
 # ---------- Simulasyon (kernel algoritmalari gercekten calisir) ----------
 SIMSRC := sim/sim_main.c sim/sim_hw.c sim/sim_tests.c sim/sim_kprintf.c \
+          sim/sim_personal.c \
           kernel/time/timesrc.c kernel/drivers/storage/nvme.c \
           kernel/drivers/wifi/rtw_wifi.c kernel/arch/x86_64/vmx.c
 
 sim: build/amcsim
 
-build/amcsim: $(SIMSRC) sim/posix_compat.h sim/sim_hw.c Makefile
+APPSRC := apps/desktop/theme.c apps/desktop/animations.c apps/assistant/amc_ai.c
+
+build/amcsim: $(SIMSRC) $(APPSRC) sim/posix_compat.h sim/sim_hw.c Makefile
 	@mkdir -p build
-	$(HOSTCC) -DAMC_SIM -I sim -I kernel -O1 -g -Wall -Wextra -Wno-unused-parameter \
-	  $(SIMSRC) -o $@
+	$(HOSTCC) -DAMC_SIM -I sim -I kernel -O1 -g -Wall -Wextra -Wno-unused-parameter -Wno-unused-function \
+	  $(SIMSRC) -o $@ -lm
 	@echo "[sim] derlendi -> build/amcsim"
 
 run-sim: sim
