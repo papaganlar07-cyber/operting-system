@@ -39,6 +39,8 @@ static volatile u32 *map(u64 off){ return (volatile u32*)((char*)sim_mmio + (off
 #define NVS_AQA     0x0018   /* admin queue attributes         */
 #define NVS_ASQ     0x0028   /* admin SQ base                  */
 #define NVS_ACQ     0x0030   /* admin CQ base                  */
+#define NVS_DB_SQ0_TAIL 0x1080 /* doorbell SQ0 tail (CAP.DSTRD=0)  */
+#define NVS_DB_CQ0_HEAD 0x1088 /* doorbell CQ0 head               */
 
 #define CC_EN       (1u<<0)
 #define CSTS_RDY    (1u<<0)
@@ -73,23 +75,52 @@ struct nvme_ctrl {
     u64 cap_dstrd, cap_mpsmin;
     bool ready;
 };
-static struct nvme_ctrl g_nvme;
-
-/* ---- sim: surucunun "fiziksel" adreslerini donanim modeliyle paylas ---- */
 #ifdef AMC_SIM
 extern unsigned char sim_mmio[];
 #define NV_Q_OFF   0x21000u            /* sim_hw.c ile ANLASMALI */
 #define NV_PRP_OFF 0x29000u            /* identify/log icin 8KB golge */
 static void *nv_at(u32 off){ return (char*)sim_mmio + off; }
-u64 sim_xlate(void *p){ return (u64)(uintptr_t)p; }   /* pointer==adres (paylasili alan) */
-#define XLATE(p) sim_xlate(p)
+/* Sim'de "fiziksel" adres = surucu pointer'i (identity map). Adres
+ * cozumlemezse (orn. 0x1000 gibi sabit denemeler) anlasamali golge
+ * bolgesine dusurulur; sim_hw.c ayni kurali uygular (v0.7 sozlesme). */
+#define NV_SHADOW_LO 0x20000u           /* sim_hw.c ile ANLASMALI (golge PRP bolgesi) */
+#define NV_SHADOW_SZ 0x4000u
+static inline u64 xlate_checked(const void *p){
+    uintptr_t a = (uintptr_t)p;
+    if (a >= 0x10000ull) return (u64)a;          /* host heap/statik: gecerli adres */
+    return (u64)(NV_SHADOW_LO + (a & (NV_SHADOW_SZ-1))); /* sahte adres: golgeye esle */
+}
+#define XLATE(p) xlate_checked(p)
 #else
 #define XLATE(p) ((u64)(uintptr_t)(p))                 /* gercek kernel: mm_virt2phys */
 #define nv_at(o) ((void*)(uintptr_t)(o))               /* fiziksel esleme: identity map */
 #endif
+static struct nvme_ctrl g_nvme;
+
+/* ---- sim: surucunun "fiziksel" adreslerini donanim modeliyle paylas ---- */
 
 int nvme_submit(struct nvme_sqe *cmd);
 int nvme_poll_completion(u16 cid, u32 *result, u16 *status_out);
+
+
+
+/* Paylasimli admin kuyruklari: sim_hw donanim modeli bu dizileri
+ * ASQ/ACQ adresleri olarak okur (surucu pointer'i == "fiziksel" adres). */
+struct nvme_sqe sim_admin_sq[QD];
+struct nvme_cqe sim_admin_cq[QD];
+/* Kimlik-doğrulama (identity check) sozlesmesi: surucu bu alanlari
+ * "fiziksel adres" olarak PRP1'e yazar; sim_hw donanim modeli ayni
+ * pointer'i geri alip dogrudan doldurur. Gercek donanimda buradan
+ * DMA-able (fiziksurekli, 4K hizali) sayfalar secilir. v0.7 */
+uint8_t g_ident_page[4096] __attribute__((aligned(4096)));   /* Identify PRP hedefi */
+struct nvme_smart g_smart_page __attribute__((aligned(64))); /* SMART log hedefi  */
+
+#ifdef AMC_SIM
+void sim_hw_tick(void);                /* sim/sim_hw.c — tanimli, extern gerekmez */
+#define NV_TICK() sim_hw_tick()
+#else
+#define NV_TICK() do {} while(0)       /* gercek donanimda register kendisi degisir */
+#endif
 
 /* ---- init: enable + admin kuyruklar kur ---- */
 int nvme_init(void *bar0_virt, int irq_msix_vectors) {
@@ -98,28 +129,42 @@ int nvme_init(void *bar0_virt, int irq_msix_vectors) {
     g_nvme.cap_dstrd = (cap>>32)&0xF;
     g_nvme.cap_mpsmin = (cap>>48)&0xF;
 
-    /* disable → wait RDY=0 → configure → enable → wait RDY=1 */
+    /* disable → wait RDY=0 → configure → enable → wait RDY=1.
+     * v0.7 DUZELTME: bekleme donguleri artik her denemede tick atiyor;
+     * eski kod hic sim_hw_tick cagirmadigi icin RDY asla 1 olmuyor ve
+     * surucu TIMEOUT'e dusuyordu (cap=0 hatasi da ayni nedenden). */
     REGW(NVS_CC, 0);
-    for (int t=0; t<500 && (REG(NVS_CSTS)&CSTS_RDY); t++) {}
+    for (int t=0; t<500 && (REG(NVS_CSTS)&CSTS_RDY); t++) NV_TICK();
     if (REG(NVS_CSTS) & CSTS_CFS) { kprintf("[nvme] CFS fatal! reset\n"); }
 
     /* ASCS=0, ACQS=0 (64 derinlik), IOSQES/IOCQES=6 */
     REGW(NVS_AQA, ((QD-1)<<16) | (QD-1));
-    REGW(NVS_ASQ, 0x1000);          /* sim: admin SQ fiziksel adresi */
-    REGW(NVS_ACQ, 0x2000);
+    /* Kuyruk adres sozlesmesi (v0.7): surucu kuyruklari sim_admin_sq/cq
+     * dizilerinde durur; hw modeli bu dizilere extern erisir. Register'a
+     * yazilan deger 64B'lik kaydirmadir (sq[i] = sqe_taban + i*64). */
+    REGW(NVS_ASQ, XLATE(sim_admin_sq) >> 6);
+    REGW(NVS_ACQ, XLATE(sim_admin_cq) >> 4);
     u32 cc = CC_EN | (0<<4) /*IOCQES*/ | (6<<16) | (0<<7);
     cc |= (u32)(irq_msix_vectors>1 ? 1 : 0) << 14; /*vectorize vector config */
     REGW(NVS_CC, cc);
-    for (int t=0; t<500 && !(REG(NVS_CSTS)&CSTS_RDY); t++) {}
+    for (int t=0; t<500 && !(REG(NVS_CSTS)&CSTS_RDY); t++) NV_TICK();
     g_nvme.ready = !!(REG(NVS_CSTS)&CSTS_RDY);
     kprintf("[nvme] controller %s (CAP=0x%llx, MSIX=%d)\n",
             g_nvme.ready?"READY":"TIMEOUT",(unsigned long long)cap, irq_msix_vectors);
     if (!g_nvme.ready) return -1;
 
-    /* Identify Controller: model numarasını çek */
+    /* Identify Controller: model numarasını çek (cid=1) */
     struct nvme_sqe c = {0};
+    c.cid = 1;
     c.opcode = OP_AD_IDENTIFY; c.cdw10 = 1; /* CNS=1 controller */
+    c.prp1 = XLATE(g_ident_page);           /* 4KB identify tamponu */
     nvme_submit(&c);
+    u32 res; u16 st; int spins=0;
+    while (nvme_poll_completion(c.cid, &res, &st) == -2 && spins++ < 500) NV_TICK();
+    if (st==0 && spins<500)
+        kprintf("[nvme] model: %.20s SN:%.10s (Identify OK)\n",
+                (char*)&g_ident_page[0], (char*)&g_ident_page[24]);
+    else kprintf("[nvme] Identify tamamlanamadi (spins=%d status=0x%x)\n", spins, st);
     return 0;
 }
 
@@ -127,7 +172,7 @@ int nvme_init(void *bar0_virt, int irq_msix_vectors) {
 int nvme_submit(struct nvme_sqe *cmd) {
     g_nvme.sq[g_nvme.sq_tail] = *cmd;
     g_nvme.sq_tail = (g_nvme.sq_tail + 1) % QD;
-    REGW(0x1000, g_nvme.sq_tail);   /* SQ0 tail doorbell */
+    REGW(NVS_DB_SQ0_TAIL, g_nvme.sq_tail);   /* SQ0 tail doorbell (0x1080) */
     return 0;
 }
 
@@ -138,21 +183,24 @@ int nvme_poll_completion(u16 cid, u32 *result, u16 *status_out) {
     if (status_out) *status_out = e->status_phase >> 1;
     g_nvme.cq_head = (g_nvme.cq_head + 1) % QD;
     if (g_nvme.cq_head == 0) g_nvme.phase ^= 1;   /* phase wrap */
-    REGW(0x1004, g_nvme.cq_head);                  /* CQ head doorbell */
+    REGW(NVS_DB_CQ0_HEAD, g_nvme.cq_head);         /* CQ0 head doorbell (0x1088) */
     (void)cid;
     return 0;
 }
 
 /* ---- LBA okuma/yazma ---- */
 static int nvme_rw(u8 op, u32 lba, u16 blocks, void *buf) {
+    static u16 next_cid = 16;
     struct nvme_sqe c = {0};
+    c.cid = next_cid++;
     c.opcode = op; c.nsid = 1;
-    c.prp1 = (u64)(uintptr_t)buf;                 /* tek sayfa varsayımı */
+    c.prp1 = XLATE(buf);                           /* tek sayfa varsayımı */
     c.cdw10 = lba; c.cdw11 = 0;                      /* 4KB LBA alani: high 32 simde 0 */
     c.cdw12 = blocks - 1;                          /* 0-based */
     nvme_submit(&c);
-    u32 res; u16 st;
-    while (nvme_poll_completion(c.cid, &res, &st) == -2) {}
+    u32 res; u16 st; int spins=0;
+    while (nvme_poll_completion(c.cid, &res, &st) == -2 && spins++ < 1000) NV_TICK();
+    if (spins>=1000) { kprintf("[nvme] I/O timeout lba=%u\n", lba); return -2; }
     if (st) { kprintf("[nvme] I/O hata status=0x%x lba=%u\n", st, lba); return -1; }
     return 0;
 }
@@ -165,14 +213,17 @@ struct nvme_smart {
     u8  spare_thresh; u8 reserved; u64 data_units_rw[2];
     u64 power_on_hours[2]; u32 unsafe_shutdowns; u32 media_errors;
 };
-int nvme_get_smart(struct nvme_smart *s) {
+int nvme_get_smart(struct nvme_smart *s_user) {
+    struct nvme_smart *s = s_user ? s_user : &g_smart_page;
     struct nvme_sqe c = {0};
+    c.cid = 8;
     c.opcode = OP_AD_GETLOG; c.nsid = 0xFFFFFFFF;
     c.cdw10 = 0x02 | ((sizeof(*s)/512) << 16);   /* LID=2, numd */
-    c.prp1 = (u64)(uintptr_t)s;
+    c.prp1 = XLATE(s);
     nvme_submit(&c);
-    u32 res; u16 st;
-    while (nvme_poll_completion(c.cid,&res,&st) == -2) {}
+    u32 res; u16 st; int spins=0;
+    while (nvme_poll_completion(c.cid,&res,&st) == -2 && spins++ < 1000) NV_TICK();
+    if (spins>=1000) { kprintf("[nvme] SMART timeout\n"); return -2; }
     if (st) return -1;
     int celsius = s->temp_kelvin - 273;
     kprintf("[nvme] SMART: sicaklik=%dC kullanim=%u%% POH=%llu medya_hata=%u\n",
