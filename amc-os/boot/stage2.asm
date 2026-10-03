@@ -42,7 +42,7 @@ stage2_start:
     mov dword [pdpt], pd
     ; PD: 512 x 2MB'lık büyük sayfa girişleri (0 .. 1GB)
     mov edi, pd
-    ecx, 0
+    mov ecx, 0
 .build_pd:
     mov eax, ecx
     shl eax, 21                 ; ecx * 2MB
@@ -75,7 +75,8 @@ stage2_start:
     mov cr0, eax
 
     lgdt [gdt64.pointer]
-    jmp gdt64.code64:long_mode_entry
+    mov eax, 0x08
+jmp long_mode_entry
 
 enter_protected32:
     ; ================= 32-BIT KORUMALI MOD YOLU =================
@@ -83,7 +84,8 @@ enter_protected32:
     mov eax, cr0
     or  eax, 1                  ; PE biti
     mov cr0, eax
-    jmp gdt32.code32:protected_mode_entry
+    mov eax, 0x08
+jmp protected_mode_entry
 
 ; ---------- 16-bit yazdırma yardımcısı ----------
 print_string16:
@@ -97,7 +99,7 @@ print_string16:
 
 [BITS 64]
 long_mode_entry:
-    mov ax, gdt64.data
+    mov ax, 0x10
     mov ds, ax
     mov es, ax
 
@@ -111,7 +113,7 @@ long_mode_entry:
 
 [BITS 32]
 protected_mode_entry:
-    mov ax, gdt32.data
+    mov ax, 0x10
     mov ds, ax
     mov es, ax
     mov ax, ss
@@ -125,10 +127,8 @@ protected_mode_entry:
 ; ================= GDT (64-bit) =================
 align 8
 gdt64:
-    .null:   equ 0
-    .code64: equ $ - gdt64
+    dq 0 ; null
     dq (1<<43) | (1<<44) | (1<<47) | (1<<53)   ; L=1, P=1, D=0, S=1, Type=Code
-    .data:   equ $ - gdt64
     dq (1<<41) | (1<<44) | (1<<47)             ; W=1, P=1, S=1, Data
 .pointer:
     dw $ - gdt64 - 1
@@ -137,11 +137,9 @@ gdt64:
 ; ================= GDT (32-bit yedek) =================
 align 4
 gdt32:
-    .null:   equ 0
-    .code32: equ $ - gdt32
-    dd 0x00CF9800               ; 32-bit kod, taban 0, sınır max
-    .data32: equ $ - gdt32
-    dd 0x00CF9200               ; 32-bit veri
+    dd 0,0                      ; null
+    dd 0x00CF9800,0             ; 32-bit kod
+    dd 0x00CF9200,0             ; 32-bit veri
 .pointer:
     dw $ - gdt32 - 1
     dd gdt32
@@ -154,4 +152,4 @@ pml4: times 512 dq 0
 pdpt: times 512 dq 0
 pd:   times 512 dq 0
 
-times 1024*2-($-$$) db 0        ; stage2 tam 2 sektör
+; stage2 boyutu ~16KB (sayfa tablolar dahil); MBR STAGE2_SECTORS=32 yeter
