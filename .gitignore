@@ -1,0 +1,6 @@
+# Build artifacts
+amc-os/build/node_modules/
+.next/
+dist/
+build/
+*.log
