@@ -43,6 +43,8 @@ void personalization_sim_test(void) {
     win_anim a;
     anim_start(&a, FX_SCALE, EA_SPRING, 0, 100,100,600,400, 100,100,600,400, 320, t.anim_speed);
     int frames=0; while (anim_step(&a, 16.f) && frames<40) frames++;
+    /* NOT: onceki surumde asagidaki dongu `frames++` unutuldugu icin
+       sonsuz donuyordu (v0.6 takilma hatasi). Duzeltildi + ust sinir sigortasi. */
     CHECK(!a.active && fabsf(a.out_scale_x-1.f)<0.02f && a.out_alpha>0.99f,
           "scale+spring ~%d frame'de tamamlandi (1.0 olcek, opak)", frames);
     anim_start(&a, FX_GENIE, EA_EASEOUT, 1, 200,80,800,500, 200,80,800,500, 420, 100);

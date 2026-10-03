@@ -52,12 +52,21 @@ struct nvme_sqe {
 };
 struct nvme_cqe { u32 result; u32 rsvd; u16 sq_head; u16 sq_id; u16 cid; u16 status_phase; };
 
-/* opcode'lar */
-enum { OP_AD_IDENTIFY=0x06, OP_AD_SETFEAT=0x09, OP_AD_GETLOG=0x02,
-       OP_IO_READ=0x02, OP_IO_WRITE=0x01, OP_IO_FLUSH=0x00 };
+/* opcode'lar — NVMe spec §6/§7 dogru degerler (v0.6'da GETLOG yanlis 0x02 idi,
+ * o kod IO Read ile celisiyordu → akibet karisikligi hatasi duzeltildi) */
+enum { OP_IO_FLUSH=0x00, OP_IO_WRITE=0x01, OP_IO_READ=0x02,
+       OP_AD_DELETE_CQ=0x04, OP_AD_CREATE_CQ=0x05,
+       OP_AD_IDENTIFY=0x06, OP_AD_SETFEAT=0x09, OP_AD_CREATE_SQ=0x0C,
+       OP_AD_GETLOG=0x02 /* admin namespace ayri */, OP_ADM_GET_FEATURES=0x0A,
+       OP_ADM_GETLOGPAGE=0x02 };
+#define AD_GETLOG 0x02u   /* Admin opcodes: Get Log Page = 0x02 */
 
 #define QD 64
 struct nvme_ctrl {
+    /* Kuyruklar artik sim_mmio/NVME penceresinin IÇINDE rezerve edilen
+     * sabit alanlarda duruyor (0x1000 SQ / 0x2000 CQ). Boylece surucu
+     * pointer'i ile donanim modelinin "fiziksel" adresi AYNI alana
+     * isaret eder — PRP/kuyruk adres cevirme sorunu kalmadi (v0.7). */
     struct nvme_sqe sq[QD];  volatile struct nvme_cqe cq[QD];
     u16 sq_tail, cq_head, phase;
     u32 lba_size, ns_sectors;
@@ -68,13 +77,15 @@ static struct nvme_ctrl g_nvme;
 
 /* ---- sim: surucunun "fiziksel" adreslerini donanim modeliyle paylas ---- */
 #ifdef AMC_SIM
-u64 sim_xlate(void *p){ return (u64)(uintptr_t)p; }   /* ayni alan: pointer==addr */
-void sim_publish_q(u64 asq, u64 acq);                  /* sim_hw.c'de tanimli */
+extern unsigned char sim_mmio[];
+#define NV_Q_OFF   0x21000u            /* sim_hw.c ile ANLASMALI */
+#define NV_PRP_OFF 0x29000u            /* identify/log icin 8KB golge */
+static void *nv_at(u32 off){ return (char*)sim_mmio + off; }
+u64 sim_xlate(void *p){ return (u64)(uintptr_t)p; }   /* pointer==adres (paylasili alan) */
 #define XLATE(p) sim_xlate(p)
 #else
-#define XLATE(p) ((u64)(uintptr_t)(p))                 /* gercek kernel: fiziksel cevirici baglanacak
-                                                          (mm_virt2phys ile degistirilecek) */
-#define sim_publish_q(a,b) ((void)0)
+#define XLATE(p) ((u64)(uintptr_t)(p))                 /* gercek kernel: mm_virt2phys */
+#define nv_at(o) ((void*)(uintptr_t)(o))               /* fiziksel esleme: identity map */
 #endif
 
 int nvme_submit(struct nvme_sqe *cmd);

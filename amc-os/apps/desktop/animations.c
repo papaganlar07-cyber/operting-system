@@ -103,13 +103,19 @@ int anim_step(win_anim *a, float dt_ms) {
         /* üst kenar sabit, alt kenar görev çubuğundaki simgeye doğru
          * büzülür; yatayda ortalanarak daralır (Bezier yakınsama).
          * Kapanışta p tersine çevrilmiş gelir → baştan küçük olmalı. */
+        /* q: burusma orani — acilista 0→1 (buyur), kapanista 1→0 (kuculur).
+         * Kapanis dongusu `p` zaten tersine cevrilmis geldigi icin (p=1-p),
+         * closing'de q=p dogrudur: ilk frame'de q~0 → pencere simgeye
+         * dogru aninda ezilmeye baslar (macOS genie davranisi). */
         float q = a->closing ? p : 1.f - p;           /* 1→0 burusma */
         float sx = 0.15f + 0.85f * q;                 /* yatay daralma */
         float sy = 0.05f + 0.95f * q;                 /* dikey ezilme  */
         a->out_scale_x = sx; a->out_scale_y = sy;
-        a->out_dx = (a->gx - (a->x0 + a->w0/2)) * (1.f - p) * 0.35f;
-        a->out_dy = (a->gy - (a->y0 + a->h0)) * (1.f - p);
-        a->out_alpha = 1.f;
+        /* dx/dy de q uzayindan hesaplanmali (p degil!) — aksi halde
+         * kapanis animasyonunda kayma yonu terste kalir (v0.6 hatasi). */
+        a->out_dx = (a->gx - (a->x0 + a->w0/2)) * (1.f - q) * 0.35f;
+        a->out_dy = (a->gy - (a->y0 + a->h0)) * (1.f - q);
+        a->out_alpha = 0.55f + 0.45f * q;             /* sona dogru hafif solar */
         break;
     }
     case FX_BOUNCE:
