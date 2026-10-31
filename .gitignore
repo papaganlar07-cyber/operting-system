@@ -1,1 +1,4 @@
-(empty)
+*.bin
+*.elf
+*.o
+*.img
