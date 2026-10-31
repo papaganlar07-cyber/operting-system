@@ -1,73 +1,122 @@
 # ============================================================
-# AMC OS v0.5 - Derleme Sistemi
-#   make bootloader : boot.img (MBR+stage2, nasm ile GERCEKTEN derlenir)
-#   make sim        : ./build/amcsim  (sanal anakart uzerinde kernel kodu!)
-#   make run-sim    : simulasyonu calistir (boot akisi + suurucu testleri)
-#   make kernel     : amc-kernel.elf (cross-toolchain gerektirir)
-#   make image      : QEMU disk imaji
-#   make run        : qemu-system-x86_64
-#   make test-boot  : MBR imzasi/boyut dogrulamasi
+#  AMC-OS Makefile - boot.asm + kernel.c -> amc-os.iso (GRUB)
+#  Kullanim:
+#     make            -> ISO uretir (build/amc-os.iso)
+#     make run        -> QEMU'da baslatir
+#     make clean      -> her seyi temizler
+#   Cross-compiler varsa:  make CROSS=i686-elf-
+#   Duz yerel gcc ile    :  make CROSS=
 # ============================================================
-CC       ?= gcc
-HOSTCC   := gcc
-NASM     := nasm
-CROSSCC  := x86_64-elf-gcc
 
-.PHONY: all bootloader sim run-sim kernel image run test-boot clean
+CROSS ?= $(shell command -v i686-elf-gcc >/dev/null 2>&1 && echo "i686-elf-" || echo "")
 
-all: bootloader sim test-boot
+NASM          := nasm
+CC            := $(CROSS)gcc
+LD            := $(CROSS)gcc
+OBJCOPY       := $(CROSS)objcopy
+GRUB_MKRESCUE := grub-mkrescue
 
-# ---------- Onyukleyici (gercek derleme) ----------
-bootloader: build/stage1.bin build/stage2.bin
-	cat build/stage1.bin build/stage2.bin > build/bootimg.bin
-	@echo "bootimg.bin: $$(wc -c < build/bootimg.bin) bayt"
+# --- Bayraklar ---------------------------------------------------------
+NASMFLAGS := -f elf32
 
-build/stage1.bin: boot/boot.asm
-	@mkdir -p build
-	$(NASM) -f bin boot/boot.asm -o $@
+# Derleyici/linker mimari bayragi: 32-bit hedef.
+# Debian/Ubuntu gcc hem -m32 destekler; i686-elf-gcc icin bos birakilir.
+ARCHFLAG := $(if $(filter i686-elf-,$(CROSS)),,-m32)
 
-build/stage2.bin: boot/stage2.asm
-	@mkdir -p build
-	$(NASM) -f bin boot/stage2.asm -o $@
+# freestanding, red-zone yok (interruptler icin kritik), PIC yok
+CFLAGS  := -std=gnu17 -O2 -g -Wall -Wextra -Werror \
+           -ffreestanding -fno-pic -fno-pie -fno-stack-protector \
+           -mno-red-zone $(ARCHFLAG) -Isrc
 
-test-boot: build/stage1.bin
-	@sz=$$(stat -c%s build/stage1.bin); sig=$$(tail -c2 build/stage1.bin | od -An -tx1 | tr -d ' '); \
-	if [ "$$sz" = "512" ] && [ "$$sig" = "55aa" ]; then \
-	  echo "[test-boot] OK: MBR 512B + 0x55AA imzasi dogru"; \
-	else echo "[test-boot] HATA: boyut=$$sz imza=$$sig"; exit 1; fi
+LDFLAGS := -T src/linker.ld -nostdlib -static $(ARCHFLAG) \
+           -z max-page-size=0x1000 -z noexecstack
 
-# ---------- Simulasyon (kernel algoritmalari gercekten calisir) ----------
-SIMSRC := sim/sim_main.c sim/sim_hw.c sim/sim_tests.c sim/sim_kprintf.c \
-          sim/sim_personal.c \
-          kernel/time/timesrc.c kernel/drivers/storage/nvme.c \
-          kernel/drivers/wifi/rtw_wifi.c kernel/arch/x86_64/vmx.c
+# --- Dosyalar ----------------------------------------------------------
+SRC_DIR   := src
+BUILD_DIR := build
+ISO_DIR   := $(BUILD_DIR)/isodir
 
-sim: build/amcsim
+BOOT_OBJ   := $(BUILD_DIR)/boot.o
+KERNEL_OBJ := $(BUILD_DIR)/kernel.o
+OBJS       := $(BOOT_OBJ) $(KERNEL_OBJ)
 
-APPSRC := apps/desktop/theme.c apps/desktop/animations.c apps/assistant/amc_ai.c
+KERNEL_ELF   := $(BUILD_DIR)/kernel.elf
+MODULE_BIN   := $(ISO_DIR)/boot/amc-os.bin
+GRUB_CFG_DIR := $(ISO_DIR)/boot/grub
+GRUB_CFG     := $(GRUB_CFG_DIR)/grub.cfg
 
-build/amcsim: $(SIMSRC) $(APPSRC) sim/posix_compat.h sim/sim_hw.c Makefile
-	@mkdir -p build
-	$(HOSTCC) -DAMC_SIM -I sim -I kernel -O1 -g -Wall -Wextra -Wno-unused-parameter -Wno-unused-function \
-	  $(SIMSRC) -o $@ -lm
-	@echo "[sim] derlendi -> build/amcsim"
+ISO := $(BUILD_DIR)/amc-os.iso
 
-run-sim: sim
-	@./build/amcsim
+# --- Hedefler ----------------------------------------------------------
+.PHONY: all run qemu vbox clean check-tools
 
-# ---------- Cross kernel (toolchain varsa) ----------
-kernel:
-	@if command -v $(CROSSCC) >/dev/null; then \
-	  echo "[kernel] cross toolchain var: Makefile.kernel ile derle"; \
-	else \
-	  echo "[kernel] x86_64-elf-gcc yok. 'make sim' ile yerel test onerilir."; fi
+all: iso
 
-image: bootloader
-	python3 tools/mkimage.py build/bootimg.bin build/amcos.img
+# 1) Assembly -> ELF32 nesne
+$(BOOT_OBJ): $(SRC_DIR)/boot.asm | $(BUILD_DIR)
+	@echo "[NASM] $< -> $@"
+	$(NASM) $(NASMFLAGS) $< -o $@
 
-run: image
-	qemu-system-x86_64 -drive format=raw,file=build/amcos.img -m 512 -serial stdio || \
-	  echo "[run] qemu kurulu degil; 'make run-sim' deneyin"
+# 2) C -> freestanding nesne
+$(KERNEL_OBJ): $(SRC_DIR)/kernel.c | $(BUILD_DIR)
+	@echo "[CC ] $< -> $@"
+	$(CC) $(CFLAGS) -c $< -o $@
+
+# 3) Link -> Multiboot ELF (GRUB dogrudan bu ELF'i boot edebilir)
+$(KERNEL_ELF): $(OBJS) $(SRC_DIR)/linker.ld | $(BUILD_DIR)
+	@echo "[LD ] $(OBJS) -> $@"
+	$(LD) $(LDFLAGS) $(OBJS) -o $@
+
+# 4) Yedek moduler format (bazi GRUB kurulumlari 'module' olarak raw bin ister)
+$(MODULE_BIN): $(KERNEL_ELF) | $(BUILD_DIR)
+	@mkdir -p $(ISO_DIR)/boot
+	@echo "[OBJCOPY] $< -> $@"
+	$(OBJCOPY) -O binary $< $@
+
+# 5) grub.cfg otomatik yazilir
+$(GRUB_CFG): | $(BUILD_DIR)
+	@mkdir -p $(GRUB_CFG_DIR)
+	@echo "[GRUB] $(GRUB_CFG) olusturuluyor"
+	@printf '%s\n' \
+'set timeout=5' \
+'set default=0' \
+'menuentry "AMC-OS v0.1" {' \
+'    multiboot /boot/kernel.elf' \
+'    boot' \
+'}' > $@
+
+# 6) ISO uretimi
+iso: $(KERNEL_ELF) $(GRUB_CFG) | check-tools
+	@mkdir -p $(ISO_DIR)/boot
+	@cp $(KERNEL_ELF) $(ISO_DIR)/boot/kernel.elf
+	@echo "[ISO] $(ISO) uretiliyor..."
+	$(GRUB_MKRESCUE) -o $(ISO) $(ISO_DIR)
+	@ls -lh $(ISO)
+
+check-tools:
+	@command -v $(GRUB_MKRESCUE) >/dev/null 2>&1 || { \
+	  echo "EKSIK PAKET: grub-mkrescue yok."; \
+	  echo "Debian/Ubuntu: sudo apt install -y grub-pc-bin grub-common xorriso mtools"; \
+	  echo "Arch:          sudo pacman -S --needed grub mtools xorriso"; \
+	  echo "Fedora:        sudo dnf install -y grub2-pc-modules grub2-tools xorriso mtools"; \
+	  exit 1; }
+	@command -v nasm >/dev/null 2>&1 || { echo "EKSIK: nasm"; exit 1; }
+
+$(BUILD_DIR):
+	@mkdir -p $(BUILD_DIR)
+
+# 7) QEMU'da calistir
+run: iso
+	qemu-system-i386 -cdrom $(ISO) -boot d -m 256M -serial stdio
+
+qemu: run
+
+# 8) VirtualBox notu (VMDK uretimi opsiyonel)
+vbox: iso
+	@echo "VirtualBox: yeni makine (Type: Other/Version: DOS veya Linux 32-bit)"
+	@echo "            Optical Drive -> $(abspath $(ISO))"
+	@command -v VBoxManage >/dev/null 2>&1 && \
+	  VBoxManage convertfromraw --format VMDK $(ISO) $(BUILD_DIR)/amc-os.vmdk || true
 
 clean:
-	rm -rf build
+	rm -rf $(BUILD_DIR)
